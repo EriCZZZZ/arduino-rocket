@@ -17,6 +17,10 @@
 
 #define COMMANDER_PORT_RATE 9600
 
+#define XYZ_X_PIN 8
+#define XYZ_Y_PIN 9
+#define XYZ_Z_PIN 10
+
 /***************
  * global vars *
  ***************/
@@ -37,12 +41,10 @@ void setup() {
         // init communication with commander
         Serial.begin(COMMANDER_PORT_RATE);
         send2commander("[INIT] 初始化系统");
-        sendStatusFlags2Commander();
 
         // change flag
         status_flags = status_flags | STATUS_INIT;
         send2commander("[INIT] 初始化完毕,启动Scoop主循环");
-        sendStatusFlags2Commander();
 
         // start SCoop
         mySCoop.start();
@@ -81,34 +83,57 @@ void RecvCommand::loop() {
 }
 
 // task to report xyz
+int bx;
+int by;
+int bz;
+int bg;
 defineTask(WorkReportXYZ);
 void WorkReportXYZ::setup() {
-
+        send2commander("[XYZ] 初始化加速度芯片");
+        sleep(1000);
+        bx = calXYZBase(XYZ_X_PIN);
+        by = calXYZBase(XYZ_Y_PIN);
+        bz = calXYZBase(XYZ_Z_PIN);
+        int tmp = (bx + by) / 2 ;
+        bg = bz - tmp;
+        bx = tmp;
+        by = tmp;
+        bz = tmp;
+        char msg[48];
+        sprintf(msg, "[XYZ] 初始值 x=%d y=%d z=%d 1g=%d", bx, by, bz, bg);
+        send2commander(msg);
 }
 
 void WorkReportXYZ::loop() {
         if ((status_flags & STATUS_FLYING) > 0) {
+                char xyz[32];
+                char xstr[6];
+                char ystr[6];
+                char zstr[6];
+                dtostrf(calAcc(XYZ_X_PIN, bx), 1, 2, xstr);
+                dtostrf(calAcc(XYZ_Y_PIN, by), 1, 2, ystr);
+                dtostrf(calAcc(XYZ_Z_PIN, bz), 1, 2, zstr);
+
+                sprintf(xyz, "[XYZ] x=%sg y=%sg z=%sg", xstr, ystr, zstr);
+                send2commander(xyz);
 #ifdef DEBUG
-                sendStatusFlags2Commander();
                 char cfMsg[16];
-                sprintf(cfMsg, "[xyz debug] %d", status_flags & STATUS_WAIT_LAUNCH);
+                sprintf(cfMsg, "[xyz debug] %d", stackLeft());
                 Serial.println(cfMsg);
 #endif
-                send2commander("[XYZ] x - 1 y - 2 z - 3");
-                yield();
-                sleep(1000);
+                sleep(300);
         }
 }
 
 // task to report gps
 defineTask(WorkReportGPS);
 void WorkReportGPS::setup() {
-
 }
 
 void WorkReportGPS::loop() {
         if ((status_flags & STATUS_FLYING) > 0) {
                 send2commander("[GPS] lat lng");
+                yield();
                 sleep(1000);
         }
 }
@@ -144,4 +169,18 @@ void sendStatusFlags2Commander() {
         char msg[16];
         sprintf(msg, "[FLAGS] %d", status_flags);
         Serial.println(msg);
+}
+
+int calXYZBase(int pin) {
+        int result = analogRead(pin);
+        int i = 0;
+        while(i++ < 10) {
+                result += analogRead(pin);
+                result /= 2;
+        }
+        return result;
+}
+
+float calAcc(int pin, int base) {
+        return ((float) (analogRead(pin) - base) / bg);
 }
