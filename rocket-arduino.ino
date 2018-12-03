@@ -2,7 +2,7 @@
  * ********************
  * 接线
  * 
- * 无线接Serial1
+ * 无线接Serial
  * gps接Serial2
  * 加速度x-y-z接analog8-9-10
  * 舵机 红-5v 棕-GND 黄-Digital52
@@ -25,12 +25,12 @@
 #include "pt-timer-arduino.h"
 #include <Servo.h>
 
-#define DEBUG
+//#define DEBUG
 
 #ifdef DEBUG
 #define SERIAL_COMMANDER Serial
 #else
-#define SERIAL_COMMANDER Serial1
+#define SERIAL_COMMANDER Serial
 #endif
 #define BAUD_RATE_COMMANDER 9600
 #define SERIAL_GPS Serial2
@@ -42,6 +42,8 @@
 #define STATUS_OPEN_PARACHUTE 4
 
 #define SECONDS_BEFORE_LAUNCH 3
+
+#define COUNT_GPS_AVAILABLE 32 // 用于判断是否定位成功的gps持续性定位成功的次数
 
 #define PIN_MOTO 52
 #define PIN_ACC_X 8
@@ -78,11 +80,16 @@ void setup() {
         SERIAL_COMMANDER.begin(BAUD_RATE_COMMANDER);
         SERIAL_GPS.begin(BAUD_RATE_GPS);
 
+        send2commander("[SETUP] 初始化");
+
         // init motor
         initMotor();
 
         // init acc
         initAcc();
+
+        // init gps
+        initGPS();
 
         send2commander("[SETUP] 初始化完成");
         send2commander("[SYSTEM] 开机时间 " + String(ts_system_start));
@@ -206,15 +213,121 @@ float calAcc(int pin, int base) {
 
 // gps
 static pta_timer timer_gps;
+static String gpsOriginMsg;
+static String gpsMsgSplited[12];
+static String gpsMsg;
+static int gpsSuccessCount;
+static void initGPS() {
+        send2commander("[GPS] 开始搜星");
+        while(gpsSuccessCount < COUNT_GPS_AVAILABLE) {
+                readGPSOriginInfo();
+                if(isGPRMC()) {
+                    splitGPS();
+                    send2commander("[GPS]" + gpsOriginMsg);
+                }
+                if(isGPSReady()) {
+                        gpsSuccessCount++;
+                } else {
+                        gpsSuccessCount = 0;
+                }
+                delay(300);
+        }
+        
+        send2commander("[GPS] 定位成功");
+        parseGPS();
+}
+
 static int taskGPS(struct pt *pt) {
         PT_BEGIN(pt);
         // 等待发射
         PT_WAIT_UNTIL(pt, status_flags == STATUS_FLYING);
         while(true) {
-                send2commander("[gps]");
-                PT_DELAY_MILLIS(pt, &timer_gps, 1000);
+                while(SERIAL_GPS.available()) {
+                        parseGPS();
+                } 
+                PT_WAIT_UNTIL_OR_TIMEOUT(pt, SERIAL_GPS.available(), &timer_gps, 1000);
+                if(!SERIAL_GPS.available()) {
+                        send2commander("[GPS] Serial is NOT available");
+                }
         }
         PT_END(pt);
+}
+
+static void parseGPS() {
+        readGPSOriginInfo();
+        if (isGPRMC()) {
+#ifdef DEBUG
+                send2commander(gpsOriginMsg);
+#endif
+                splitGPS();
+            
+                // 检查是否是有效定位
+                if(isGPSReady()) {
+                        gpsMsg = "[GPS]";
+                        // date and time
+                        gpsMsg += "[" + String(gpsMsgSplited[0].substring(0, 2).toInt() + 8) + ":"
+                            + gpsMsgSplited[0].substring(2, 4) + ":"
+                            + gpsMsgSplited[0].substring(4, 6)
+                            + "]";
+
+                        // location
+                        String lng = String((gpsMsgSplited[2].toFloat()) / 100);
+                        lng.replace(".", "°");
+                        lng += "′";
+                        lng += String(
+                            gpsMsgSplited[2].substring(
+                                gpsMsgSplited[2].indexOf('.') + 1, 
+                                gpsMsgSplited[2].length()
+                            )
+                        ) + "″";
+                        String lat = String((gpsMsgSplited[4].toFloat()) / 100);
+                        lat.replace(".", "°");
+                        lat += "′";
+                        lat += String(
+                            gpsMsgSplited[4].substring(
+                                gpsMsgSplited[4].indexOf('.') + 1, 
+                                gpsMsgSplited[4].length()
+                            )
+                        ) + "″";
+                        gpsMsg += "[" + lng + ", " + lat +"]";
+
+                        // speed
+                        gpsMsg += "[" + gpsMsgSplited[6] + "节]";
+
+                        // direction
+                        gpsMsg += "[" + gpsMsgSplited[7] + "°]";
+
+                        send2commander(gpsMsg);
+                } else {
+                        send2commander("[GPS] 未成功定位");
+                }
+        } else {
+#ifdef DEBUG
+                send2commander("[GPS]NO GPRMC");
+#endif
+        }
+}
+
+static void readGPSOriginInfo() {
+        gpsOriginMsg = SERIAL_GPS.readStringUntil('$');
+}
+
+static bool isGPRMC() {
+        return gpsOriginMsg.startsWith("GPRMC");
+}
+
+static void splitGPS() {
+        // split gprmc
+        int i = 0;
+        int idx = gpsOriginMsg.indexOf(',');
+        for(i = 0; i < 12; i++) {
+                gpsMsgSplited[i] = gpsOriginMsg.substring(idx + 1, gpsOriginMsg.indexOf(',', idx + 1));
+                idx = gpsOriginMsg.indexOf(',', idx + 1);
+        }
+}
+
+static bool isGPSReady() {
+        return gpsMsgSplited[1].equals("A");
 }
 
 // 开伞
