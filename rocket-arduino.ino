@@ -81,6 +81,9 @@ void setup() {
         // init motor
         initMotor();
 
+        // init acc
+        initAcc();
+
         send2commander("[SETUP] 初始化完成");
         send2commander("[SYSTEM] 开机时间 " + String(ts_system_start));
 }
@@ -151,15 +154,54 @@ static int taskLaunch(struct pt *pt) {
 
 // 加速度
 static pta_timer timer_acc;
+// base val of xyz
+static int bx;
+static int by;
+static int bz;
+static int bg; // val / g
+static char accMsg[64];
+static char accXStr[8];
+static char accYStr[8];
+static char accZStr[8];
+static void initAcc() {
+        send2commander("[ACC] 初始化数据");
+        bx = calXYZBase(PIN_ACC_X);
+        by = calXYZBase(PIN_ACC_Y);
+        bz = calXYZBase(PIN_ACC_Z);
+
+        send2commander("[ACC] 初始化x=" + String(bx) + " y=" + String(by) + " z=" + String(bz));
+        bx = (bx + by) / 2;
+        by = bx;
+        bg = bz - bx;
+        bz = bx;
+        send2commander("[ACC] 初始化完成");
+}
 static int taskAcc(struct pt *pt) {
         PT_BEGIN(pt);
         // 等待发射
         PT_WAIT_UNTIL(pt, status_flags == STATUS_FLYING);
         while(true) {
-                send2commander("[xyz]");
+                dtostrf(calAcc(PIN_ACC_X, bx), 1, 2, accXStr);
+                dtostrf(calAcc(PIN_ACC_Y, by), 1, 2, accYStr);
+                dtostrf(calAcc(PIN_ACC_Z, bz), 1, 2, accZStr);
+                sprintf(accMsg, "[ACC] x=%sg y=%sg z=%sg", accXStr, accYStr, accZStr);
+                send2commander(accMsg);
                 PT_DELAY_MILLIS(pt, &timer_acc, 1000);
         }
         PT_END(pt);
+}
+int calXYZBase(int pin) {
+        int result = analogRead(pin);
+        int i = 0;
+        while(i++ < 10) {
+                result += analogRead(pin);
+                result /= 2;
+                delay(30);
+        }
+        return result;
+}
+float calAcc(int pin, int base) {
+        return ((float) analogRead(pin) - base) / bg;
 }
 
 // gps
