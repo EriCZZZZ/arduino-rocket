@@ -1,186 +1,199 @@
 /**
- * 命令说明
- * l(aunch) - 进入发射流程
- * o(pen)   - 强制立即开伞
- * s(top)   - 进入回收流程, 清理数据
+ * ********************
+ * 接线
+ * 
+ * 无线接Serial1
+ * gps接Serial2
+ * 加速度x-y-z接analog8-9-10
+ * 舵机 红-5v 棕-GND 黄-Digital52
+ * **重要 注意Digital两排接口两头分别为GND和5V的接口
+ * ********************
+ * 无线芯片配置
+ * http://pan.baidu.com/s/1sj9lCzN  DL-20
+ * 
+ * 已经配成9600-点对点开机-同一频道
+ * 
+ * 配置手册pdf中灯光示意
+ * 红    红
+ * 绿    绿
+ *   排针
+ * 
+ * 无线通信大概有1秒的延迟
+ * ********************
  */
-#include <SCoop.h>
+#include "pt.h"
+#include "pt-timer-arduino.h"
+#include <Servo.h>
 
-//#define DEBUG 
+#define DEBUG
 
-#define STATUS_UN_INIT 0
-#define STATUS_INIT 1
-#define STATUS_WAIT_LAUNCH 2
-#define STATUS_LAUNCHING 4
-#define STATUS_FLYING 8
-#define STATUS_OPEN_PARACHUTE 16
+#ifdef DEBUG
+#define SERIAL_COMMANDER Serial
+#else
+#define SERIAL_COMMANDER Serial1
+#endif
+#define BAUD_RATE_COMMANDER 9600
+#define SERIAL_GPS Serial2
+#define BAUD_RATE_GPS 9600
 
-#define COMMANDER_PORT_RATE 9600
+#define STATUS_WAIT_LAUNCH 1
+#define STATUS_LAUNCHING 2
+#define STATUS_FLYING 3
+#define STATUS_OPEN_PARACHUTE 4
 
-#define XYZ_X_PIN 8
-#define XYZ_Y_PIN 9
-#define XYZ_Z_PIN 10
+#define SECONDS_BEFORE_LAUNCH 3
 
-/***************
- * global vars *
- ***************/
-// rocket flags
-volatile int status_flags = 0;
-// flags mutex
-boolean mutex_status_flags = false;
+#define PIN_MOTO 52
+#define PIN_ACC_X 8
+#define PIN_ACC_Y 9
+#define PIN_ACC_Z 10
 
-/****************
- * global funcs *
- ****************/
-void send2commander(char msg[]);
+static int status_flags = 0;
 
-/***************
- * bootloader *
- ***************/
+static struct pt pt_taskWirelessSend;
+static struct pt pt_taskWirelessRecv;
+static struct pt pt_taskCommander;
+static struct pt pt_taskLaunch;
+static struct pt pt_taskAcc;
+static struct pt pt_taskGPS;
+static struct pt pt_taskOpenParachute;
+
+static unsigned long ts_system_start;
+
+/**
+ * bootloader
+ */
 void setup() {
-        // init communication with commander
-        Serial.begin(COMMANDER_PORT_RATE);
-        send2commander("[INIT] 初始化系统");
+        // 记录开机时间
+        ts_system_start = millis();
 
-        // change flag
-        status_flags = status_flags | STATUS_INIT;
-        send2commander("[INIT] 初始化完毕,启动Scoop主循环");
+        // 初始化任务
+        PT_INIT(&pt_taskCommander);
+        PT_INIT(&pt_taskLaunch);
+        PT_INIT(&pt_taskAcc);
+        PT_INIT(&pt_taskGPS);
+        PT_INIT(&pt_taskOpenParachute);
 
-        // start SCoop
-        mySCoop.start();
+        // 初始化串行IO
+        SERIAL_COMMANDER.begin(BAUD_RATE_COMMANDER);
+        SERIAL_GPS.begin(BAUD_RATE_GPS);
+
+        // init motor
+        initMotor();
+
+        send2commander("[SETUP] 初始化完成");
+        send2commander("[SYSTEM] 开机时间 " + String(ts_system_start));
 }
 
 void loop() {
-        yield();
-}
-
-// task to recv command from serial
-defineTask(RecvCommand);
-void RecvCommand::setup() {
-}
-
-void RecvCommand::loop() {
-        if((status_flags & STATUS_INIT) > 0 && Serial.available()) {
-                char cmd = Serial.read();
-                switch(cmd) {
-                        case 'l':
-                            send2commander("[RECV COMMAND] 发射");
-                            status_flags |= STATUS_WAIT_LAUNCH;
-                            break;
-                        case 'o':
-                            send2commander("[RECV COMMAND] 开降落伞");
-                            break;
-                        case 's':
-                            send2commander("[RECV COMMAND] 开始回收流程,清理数据");
-                            break;
-                        case '\n':
-                            break;
-                        default:
-                            send2commander("[RECV COMMAND] UNKNOWN COMMAND");
-                            break;
-                }
-        }
-}
-
-// task to report xyz
-int bx;
-int by;
-int bz;
-int bg;
-defineTask(WorkReportXYZ);
-void WorkReportXYZ::setup() {
-        send2commander("[XYZ] 初始化加速度芯片");
-        sleep(1000);
-        bx = calXYZBase(XYZ_X_PIN);
-        by = calXYZBase(XYZ_Y_PIN);
-        bz = calXYZBase(XYZ_Z_PIN);
-        int tmp = (bx + by) / 2 ;
-        bg = bz - tmp;
-        bx = tmp;
-        by = tmp;
-        bz = tmp;
-        char msg[48];
-        sprintf(msg, "[XYZ] 初始值 x=%d y=%d z=%d 1g=%d", bx, by, bz, bg);
-        send2commander(msg);
-}
-
-void WorkReportXYZ::loop() {
-        if ((status_flags & STATUS_FLYING) > 0) {
-                char xyz[32];
-                char xstr[6];
-                char ystr[6];
-                char zstr[6];
-                dtostrf(calAcc(XYZ_X_PIN, bx), 1, 2, xstr);
-                dtostrf(calAcc(XYZ_Y_PIN, by), 1, 2, ystr);
-                dtostrf(calAcc(XYZ_Z_PIN, bz), 1, 2, zstr);
-
-                sprintf(xyz, "[XYZ] x=%sg y=%sg z=%sg", xstr, ystr, zstr);
-                send2commander(xyz);
-#ifdef DEBUG
-                char cfMsg[16];
-                sprintf(cfMsg, "[xyz debug] %d", stackLeft());
-                Serial.println(cfMsg);
-#endif
-                sleep(300);
-        }
-}
-
-// task to report gps
-defineTask(WorkReportGPS);
-void WorkReportGPS::setup() {
-}
-
-void WorkReportGPS::loop() {
-        if ((status_flags & STATUS_FLYING) > 0) {
-                send2commander("[GPS] lat lng");
-                yield();
-                sleep(1000);
-        }
-}
-
-// task to launch
-defineTask(LaunchRocket);
-void LaunchRocket::setup() {
-
-}
-void LaunchRocket::loop() {
-        if(((status_flags & STATUS_WAIT_LAUNCH) > 0) && ((status_flags & STATUS_LAUNCHING) == 0)) {
-                status_flags |= STATUS_LAUNCHING;
-                int seconds2wait = 5;
-                char msg[16];
-                while(seconds2wait > 0) {
-                        sprintf(msg, "[LAUNCH] %d s", seconds2wait--);
-                        send2commander(msg);
-                        yield();
-                        sleep(1000);
-                }
-                send2commander("[LAUNCH] 点火");
-                status_flags |= STATUS_FLYING;
-        }
+        taskCommander(&pt_taskCommander);
+        taskLaunch(&pt_taskLaunch);
+        taskAcc(&pt_taskAcc);
+        taskGPS(&pt_taskGPS);
+        taskOpenParachute(&pt_taskOpenParachute);
 }
 
 /**
- * utils
+ * tasks
  */
-void send2commander(char msg[]) {
-        Serial.println(msg);
-}
-void sendStatusFlags2Commander() {
-        char msg[16];
-        sprintf(msg, "[FLAGS] %d", status_flags);
-        Serial.println(msg);
-}
+// 处理接受命令
+static pta_timer timer_commander;
+static String command;
+static int taskCommander(struct pt *pt) {
+        PT_BEGIN(pt);
+        send2commander("[COMMANDER] 等待接受命令 LAUNCH - 发射 PARACHUTE - 强制开伞 MONITOR - 状态");
+        while(true) {
+                PT_WAIT_UNTIL_OR_TIMEOUT(pt, SERIAL_COMMANDER.available(), &timer_commander, 3000);
+                if(SERIAL_COMMANDER.available()) {
+                        // 处理收到的命令
+                        command = SERIAL_COMMANDER.readString();
+                        command = command.substring(0, command.length() - 1);
 
-int calXYZBase(int pin) {
-        int result = analogRead(pin);
-        int i = 0;
-        while(i++ < 10) {
-                result += analogRead(pin);
-                result /= 2;
+                        send2commander("[COMMANDER] 收到命令 " + command);
+
+                        if(command.equalsIgnoreCase("launch")) {
+                                status_flags = STATUS_WAIT_LAUNCH;
+                        } else if(command.equalsIgnoreCase("parachute")) {
+                                status_flags = STATUS_OPEN_PARACHUTE;
+                        } else if(command.equalsIgnoreCase("monitor")) {
+                                send2commander("[MONITOR] status_flags " + String(status_flags));
+                                send2commander("[MONITOR] 开机毫秒数 " + String(millis() - ts_system_start));
+                        } else {
+                                send2commander("[COMMANDER] 未知命令");
+                        }
+                } else {
+                        send2commander("[COMMANDER] 等待接受命令 LAUNCH - 发射 PARACHUTE - 强制开伞 MONITOR - 状态");
+                }
+                
+                PT_YIELD(pt); // ***important***
         }
-        return result;
+        PT_END(pt);
 }
 
-float calAcc(int pin, int base) {
-        return ((float) (analogRead(pin) - base) / bg);
+// 点火
+static pta_timer timer_launch;
+static int counter_launch = SECONDS_BEFORE_LAUNCH;
+static int taskLaunch(struct pt *pt) {
+        PT_BEGIN(pt);
+        // 等待发射命令
+        PT_WAIT_UNTIL(pt, status_flags == STATUS_WAIT_LAUNCH);
+        status_flags = STATUS_LAUNCHING;
+        while(counter_launch > 0) {
+                send2commander("[LAUNCH] 倒计时 " + String(counter_launch) + "s");
+                counter_launch--;
+                PT_DELAY_MILLIS(pt, &timer_launch, 1000);
+        }
+        // todo 点火
+        send2commander("[LAUNCH] 触发点火 todo");
+        status_flags = STATUS_FLYING;
+        PT_END(pt);
+}
+
+// 加速度
+static pta_timer timer_acc;
+static int taskAcc(struct pt *pt) {
+        PT_BEGIN(pt);
+        // 等待发射
+        PT_WAIT_UNTIL(pt, status_flags == STATUS_FLYING);
+        while(true) {
+                send2commander("[xyz]");
+                PT_DELAY_MILLIS(pt, &timer_acc, 1000);
+        }
+        PT_END(pt);
+}
+
+// gps
+static pta_timer timer_gps;
+static int taskGPS(struct pt *pt) {
+        PT_BEGIN(pt);
+        // 等待发射
+        PT_WAIT_UNTIL(pt, status_flags == STATUS_FLYING);
+        while(true) {
+                send2commander("[gps]");
+                PT_DELAY_MILLIS(pt, &timer_gps, 1000);
+        }
+        PT_END(pt);
+}
+
+// 开伞
+static pta_timer timer_parachute;
+static Servo parachute;
+static int currentMotorDegree;
+
+static void initMotor() {
+        parachute.attach(PIN_MOTO);
+        currentMotorDegree = parachute.read();
+        send2commander("[PARACHUTE MOTOR] Current degree " + String(currentMotorDegree) + "°");
+} 
+
+static int taskOpenParachute(struct pt * pt) {
+        PT_BEGIN(pt);
+        PT_WAIT_UNTIL(pt, status_flags == STATUS_OPEN_PARACHUTE);
+        parachute.write((currentMotorDegree + 90) % 180);
+        PT_END(pt);
+        PT_EXIT(pt);
+}
+
+static void send2commander(String s) {
+        SERIAL_COMMANDER.println(s);
 }
