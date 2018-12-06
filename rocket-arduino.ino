@@ -9,6 +9,8 @@
  * 加速度x-y-z接analog8-9-10
  * 舵机 红-5v 棕-GND 黄-Digital52
  * **重要 注意Digital两排接口两头分别为GND和5V的接口
+ * 继电器 排针VCC/GND/IN接arduino 5v/GND/Digital22
+ *        公共端接电源,常闭端接发动机点火头
  * ********************
  * 无线芯片配置
  * http://pan.baidu.com/s/1sj9lCzN  DL-20
@@ -43,7 +45,8 @@
 #define STATUS_FLYING 3
 #define STATUS_OPEN_PARACHUTE 4
 
-#define SECONDS_BEFORE_LAUNCH 3
+#define SECONDS_BEFORE_LAUNCH 5 // 发射之前的倒计时
+#define MILLISSECONDS_LAUNCH 1000 // 开启继电器的毫秒数
 
 #define COUNT_GPS_AVAILABLE 32 // 用于判断是否定位成功的gps持续性定位成功的次数
 
@@ -51,6 +54,7 @@
 #define PIN_ACC_X 8
 #define PIN_ACC_Y 9
 #define PIN_ACC_Z 10
+#define PIN_LAUNCH 22
 
 static int status_flags = 0;
 
@@ -92,6 +96,9 @@ void setup() {
 
         // init gps
         initGPS();
+
+        // init launch
+        initLaunch();
 
         send2commander("[SETUP] 初始化完成");
         send2commander("[SYSTEM] 开机时间 " + String(ts_system_start));
@@ -145,6 +152,10 @@ static int taskCommander(struct pt *pt) {
 // 点火
 static pta_timer timer_launch;
 static int counter_launch = SECONDS_BEFORE_LAUNCH;
+static void initLaunch() {
+        send2commander("[LAUNCH] 初始化继电器IO口");
+        pinMode(PIN_LAUNCH, OUTPUT);
+}
 static int taskLaunch(struct pt *pt) {
         PT_BEGIN(pt);
         // 等待发射命令
@@ -155,8 +166,13 @@ static int taskLaunch(struct pt *pt) {
                 counter_launch--;
                 PT_DELAY_MILLIS(pt, &timer_launch, 1000);
         }
-        // todo 点火
-        send2commander("[LAUNCH] 触发点火 todo");
+        send2commander("[LAUNCH] 开启继电器 " + String(MILLISSECONDS_LAUNCH) + "ms");
+        digitalWrite(PIN_LAUNCH, HIGH);
+        PT_DELAY_MILLIS(pt, &timer_launch, MILLISSECONDS_LAUNCH);
+        
+        send2commander("[LAUNCH] 关闭继电器");
+        digitalWrite(PIN_LAUNCH, LOW);
+
         status_flags = STATUS_FLYING;
         PT_END(pt);
 }
@@ -195,7 +211,7 @@ static int taskAcc(struct pt *pt) {
                 dtostrf(calAcc(PIN_ACC_Z, bz), 1, 2, accZStr);
                 sprintf(accMsg, "[ACC] x=%sg y=%sg z=%sg", accXStr, accYStr, accZStr);
                 send2commander(accMsg);
-                PT_DELAY_MILLIS(pt, &timer_acc, 1000);
+                PT_DELAY_MILLIS(pt, &timer_acc, 200);
         }
         PT_END(pt);
 }
@@ -247,7 +263,7 @@ static int taskGPS(struct pt *pt) {
                 while(SERIAL_GPS.available()) {
                         parseGPS();
                 } 
-                PT_WAIT_UNTIL_OR_TIMEOUT(pt, SERIAL_GPS.available(), &timer_gps, 1000);
+                PT_WAIT_UNTIL_OR_TIMEOUT(pt, SERIAL_GPS.available(), &timer_gps, 200);
                 if(!SERIAL_GPS.available()) {
                         send2commander("[GPS] Serial is NOT available");
                 }
